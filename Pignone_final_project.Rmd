@@ -1,0 +1,312 @@
+---
+title: "Pignone Final Project"
+author: "Kevin Pignone"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+    toc: yes
+    toc_float: yes
+    smooth_scroll: true
+    code_folding: hide
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+devtools::install_github("benmarwick/wordcountaddin", type = "source", dependencies = TRUE)
+```
+
+### Introduction
+Access to care is crucial for improving health outcomes, and people who have a usual source of care are [more likely](https://www.ahrq.gov/research/findings/nhqrdr/chartbooks/access/elements2.html) to receive preventative care, recommended screenings, and have better health outcomes than those without a usual source of care . When access is restricted by factors such as lack of transportation, lack of insurance coverage, or considerable distance to healthcare services, health outcomes may suffer. Given a [nationwide surge](https://www.nytimes.com/2018/10/29/upshot/a-sense-of-alarm-as-rural-hospitals-keep-closing.html) in rural hospital closures, it is necessary to evaluate distance to healthcare services as a measure of access to care, in order to locate intervention opportunities that will have the greatest effect on this access metric. With this in mind, this analysis seeks to understand which community will derive the greatest access to care improvement (decrease the most distance for the most people) if a hospital were to be built in their tract. By utilizing spatial clustering analysis and observing maps to bring context to this question, we may be able to understand the degree to which access is affected by distance in North Carolina. 
+
+***
+
+### Data Preparation
+
+The majority of my data sources are from ruralhealthinfo.org, which is supported by the US DHHS. The healthcare provider data set was subsetted to only 2019 data prior to reading in, while all others were subsetted in R. 
+``` {r Library Loading, message = FALSE, warning = FALSE}
+# Loading relevant libraries for shapefile processing and mapping, setting tmap to interactive and style to cobalt
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(tmap)
+library(tidycensus)
+library(spatstat)
+library(plotly)
+library(kableExtra)
+tmap_mode("view")
+tmap_style("watercolor")
+```
+
+``` {r Data Prep, message = FALSE, warning = FALSE}
+# Read-Ins 
+
+## Medical facilities shapefile
+med_fac <- st_read("../Data/Medical_Facilities-shp/Medical_Facilities.shp", quiet = TRUE)
+
+## Health Professional Shortage Areas, by County (categorical attribute)
+hp_shortage <- read_csv("../Data/Health_Professional_Shortage_Primary_Care.csv")
+
+## Reads in Uninsured 18-64 NC County Data.
+un_adults <- read_csv("../Data/Uninsured_NC_Adults.csv")
+
+##Reads in Black Population NC County data (csv).
+black_nc <- read.csv("../Data/Black_Population-NC.csv")
+
+## Reads in NC Population 65 and Older (csv).
+older_adult <- read_csv("../Data/65_Older_NC.csv")
+
+## Read in NC Tract Boundary shapefile (shp)
+nc_tract_bound <- st_read("../Data/2010_Census_Tracts-shp/2010_Census_Tracts.shp", quiet = TRUE)
+
+# Data Prep
+
+## Subsetting Medical Facilities Data to only Hospitals and ASCs
+med_fac <- med_fac[which(med_fac$STYPE=="Hospital" | med_fac$STYPE == "Ambulatory Surgery"), ]
+
+## Pulling County Names from med_fac shp, turning it into dataframe
+med_counties <- med_fac$FCOUNTY
+med_table <- table(med_counties) %>% as.data.frame()
+
+## Subsets black_nc dataset into only 2018 data (pesky comma) by rewriting black_nc dataset with only observations whose "year" column has "2018".
+black_nc <- black_nc[which(black_nc$year == "2018"),]
+
+## Subsets un_adults data set into 2018 data, same operation as above
+un_adults <- un_adults[which(un_adults$year == "2018"),]
+
+## Subsetting older_adult dataset
+older_adult <- older_adult[which(older_adult$year == "2018"),]
+
+```
+#### Hyperlinks to the Data:
+1) Medical Facilities: [Link](https://www.nconemap.gov/datasets/medical-facilities?orderBy=STYPE) This shows all of the licensed medical facilities as of November 2020 N.C., but was subsetted from all licensed facilities to only licensed Hospitals and Ambulatory Surgery Centers. 
+2) Uninsured 18-64 [Link](https://www.ruralhealthinfo.org/data-explorer?id=212&state=NC) This shows the percentage of the adult (18-64) population that is uninsured, per county in 2018 N.C. 
+3) Black Population [Link](https://www.ruralhealthinfo.org/data-explorer?id=181&state=NC) This shows the percentage of a county's Black population, for each county in 2018 N.C. 
+4) Tract Boundary Shapefile [Link](https://catalog.data.gov/dataset/tiger-line-shapefile-2019-state-north-carolina-current-census-tract-state-based) 
+
+***
+
+### ESDA
+
+#### Data Description and Summary
+```{r Data Summary, message = FALSE, warning = FALSE}
+# Kable Table of Medical Facilities Data, columns subsetted for relevant facility info
+kable(med_fac[,c(7, 8, 11, 14)]) %>% 
+  kable_styling(bootstrap_options = c("striped", 
+                                      "hover", 
+                                      "condensed", 
+                                      "responsive"), 
+                full_width = T) %>% 
+  scroll_box(width = "60%", 
+             height = "300px", 
+             fixed_thead = TRUE)
+```
+
+``` {r Descriptive Stats, message = FALSE, warning = FALSE, class.source = "fold-show"}
+# Descriptive Statistics for Medical Facilities
+
+## Number of Rows
+nrow(med_fac)
+## Med Fac. Central Tendency & Spread
+
+### Mean Number of Facilities per County
+mean(med_table$Freq)
+### Median Number of Facilities per County
+median(med_table$Freq)
+### Interquartile Range of Facilities per County
+IQR(med_table$Freq)
+```
+
+``` {r Plots, message = FALSE, warning = FALSE}
+## Density Plot of NC Uninsured Adults, by County
+plot_ly(un_adults,
+        x = ~value,
+        type = "histogram") %>% 
+  layout(title = "NC Adult Uninsured Rate, by County", 
+     xaxis = list(title = "Proportion of Adults (18-64) Uninsured"),
+     yaxis= list(title = "Number of Counties"))
+
+## Plotly Plot of Medical Facilities per County
+plot_ly(med_table,
+        x = ~Freq,
+        type = "histogram") %>%
+  layout(title = "Number of Facilities per County, NC",
+         yaxis = list(title ="Number of Counties"),
+         xaxis = list(title ="Number of Facilities"))
+
+## Histogram of Black Population in NC Counties
+plot_ly(black_nc,
+        x = ~value,
+        type = "histogram") %>%
+  layout(title = "Black Population by County, NC",
+         yaxis = list(title = "Number of Counties"),
+         xaxis = list(title = "Proportion of Black People in County Pop."))
+
+```
+From observing the above output, I was able to better understand geographically where vulnerable populations may be, as well as areas with varying levels of health access. The mean number of medical facilities per county (`r mean(med_table$Freq)`), combined with information of the median (`r median(med_table$Freq)`) and IQR of `r IQR(med_table$Freq)`, confirms that some counties are acting as outliers and influencing the mean, namely Mecklenburg county, which has `r nrow(med_fac[which(med_fac$FCOUNTY == 'Mecklenburg'),])` medical facilities within the county. This information suggests an uneven distribution of medical facilities in N.C., which I will investigate in the Spatial Clustering Analysis section.
+
+#### Geographic Distribution and Spatial Clustering
+
+
+```{r TMaps, message = FALSE, warning = FALSE, class.source = "fold-show"}
+# Side by Side Arrangement of Medical Facilities and Census Tracts
+
+## Using Census API Key, calls for 2010 Decennial Census Data, specifically variable H002001, which is the variable code for Total Pop, Rural and Urban. 
+nc_tract <- get_decennial(geography = "tract", variables = "H002001", state = "NC", year = 2010)
+
+## Check to ensure same # of features in both datasets.
+all(nc_tract_bound$GEOID10 %in% nc_tract$GEOID)
+
+## Joins population attribute data from nc_tract data set to the nc_tract_bound shapefile 
+nc_tract_merge <- merge(nc_tract_bound, nc_tract, by.x = "GEOID10", by.y = "GEOID")
+
+## Maps merged data set 
+tm_shape(nc_tract_merge) + tm_fill(col = "value")
+
+
+## Fixing geometry of shapefile
+med_fac <- st_make_valid(med_fac)
+## Plot with dots for each point
+tm_shape(med_fac) + tm_dots()
+
+## Mapping 
+tract_map <- tm_shape(nc_tract_merge) + tm_fill(col = "value")
+fac_map <- tm_shape(med_fac) + tm_dots()
+
+tmap_arrange(tract_map,fac_map, ncol = 2, sync = TRUE)
+
+
+```
+The map shows the density of households per census tract. The size of each tract differs, with the smallest tracts lying in urban areas where households are close, and the largest tracts in rural areas with neighbors farther apart. By observing tract-level population density data, we can understand distance from medical facilities at a greater resolution county-level data. 
+
+##### NND Analysis
+```{r NND Analysis, message = FALSE, warning = FALSE, class.source = "fold-show"}
+# Nearest Neighbor Distance Analysis
+
+## Dissolving tract boundaries by summarizing GEOID codes, keeps state boundary.
+nc_tract_bound$GEOID10 <- st_area(nc_tract_bound)
+nc_full_bound <- nc_tract_bound %>%  
+  summarise(GEOID10 = sum(GEOID10))
+
+## Convert sf to ppp format.
+nc_fac_ppp <- as(med_fac, "Spatial") %>% as("ppp")
+
+
+## Random/Theoretical NND.
+n.obs <- nrow(med_fac)
+
+## Area measure of NC boundary sf.
+tract.bound.area <- st_area(nc_full_bound)
+## Perimeter measure by measuring state boundary decomposed into lines.
+tract.bound.per <- st_cast(nc_tract_bound, "MULTILINESTRING") %>%
+  st_cast("LINESTRING") %>%
+  st_length() %>%
+  sum()
+
+## Random NND Calculation.
+nc.nnd.random <- sqrt(tract.bound.area/n.obs)/2 + (0.0514 + (0.041/(sqrt(n.obs))))*(tract.bound.per/n.obs) 
+## Variance for Random NND. 
+nc.sigma.nnd.random <- sqrt(((0.07*tract.bound.area)/n.obs^2) + 0.037*tract.bound.per*sqrt(tract.bound.area/n.obs^5))
+
+## Print Results of Random NND Calculation.
+nc.nnd.random
+nc.sigma.nnd.random
+
+## Actual/Observed NND, using nndist function from spatstat package. 
+nc_fac_NND <- nndist(nc_fac_ppp)
+
+## Get mean neareast neighbor distance.
+NND <- mean(nc_fac_NND)
+
+## Get z-score of mean of observed NND, print.
+z.score.NND <- (NND - as.numeric(nc.nnd.random)) / as.numeric(nc.sigma.nnd.random)
+z.score.NND 
+
+## P-value of observed NND z-score.
+pt(z.score.NND, n.obs-1) 
+```
+For the Nearest Neighbor Distance Analysis, the theoretical mean distance is 36737.54 meters, standard deviation of 40.89 meters. Observed mean distance is 11081.94 meters, with a z-score of -15.34 and p-value of approximately 0, suggesting observed mean NND is statistically significant. The NND analysis tell us that medical facilities in North Carolina are more clustered than random.
+
+##### Quadrat Analysis
+``` {r Quadrat Analysis, message = FALSE, warning = FALSE, class.source = "fold-show"}
+# Quadrat Test
+
+## Binds study area (medical facilities) as a window, bounded by NC state boundaries.
+Window(nc_fac_ppp) <- as(nc_full_bound, "Spatial") %>% as("owin")
+marks(nc_fac_ppp) <- NULL
+
+## Maps medical facilities.
+plot(nc_fac_ppp, 
+     main = NULL, 
+     cols = rgb(0, 0, 0, 0.5), 
+     pch = 20)
+
+## Create Quadrat Counts.
+nc.fac.ppp.quadrat <- quadratcount(nc_fac_ppp,
+                                     nx = 10,
+                                     ny = 5)
+## Plot quadrat counts.
+plot(nc.fac.ppp.quadrat, 
+     cex = 0.4)
+
+## Performs quadrat test.
+nc.fac.ppp.quadrat.test <- quadrat.test(nc_fac_ppp,
+                                          nx = 10,
+                                          ny = 5)
+
+## Calculates variance-to-mean ratio.
+nc.fac.ppp.quadrat.test.VMR <- var(nc.fac.ppp.quadrat.test$observed) / mean(nc.fac.ppp.quadrat.test$observed)
+nc.fac.ppp.quadrat.test.VMR
+
+## Prints Results of Quadrat Test.
+nc.fac.ppp.quadrat.test
+```
+The VMR of 4.71 shows medical facilities in NC are more clustered than random. A p-value of approximately 0 from the Chi-Square indicates statistical significance. In context, this clustering makes sense, as medical facilities are usually found in populous cities.
+
+##### Distance Calculation
+```{r Distance Calculation, message = FALSE, warning = FALSE, class.source = "fold-show"}
+# Creates matrix with distance from the centroid of every NC tract to every NC Medical facility.
+fac.dist <- st_distance(st_centroid(nc_tract_merge), med_fac)
+
+# Finds the minimum distance from each tract to a medical facility (nearest medical facility).
+min.dist <- apply(fac.dist, 1, min)
+
+# Of the nearest medical facilities for each tract, find the farthest (maximum distance).
+max(min.dist)
+
+# Appends min.dist column to nc_tract shapefile to attribute name.
+nc_tract_merge$min.dist <- min.dist
+
+# Which row (tract) has the max nearest facility.
+which.max(nc_tract_merge$min.dist)
+
+# Prints top 3 tracts with farthest distance, info and population of top 3 + distance to nearest med fac.
+nc_tract_merge[c(1027:1028, 487, 286, 491, 1864),c(6,8,10)]
+
+
+```
+
+#### Research Question and Analysis
+Research Question: What are the largest communities in NC that also must travel the farthest to reach a medical center? 
+
+In order to answer this question, I created a matrix of the distance between every tract centroid and every medical facility to find the nearest hospital for each tract. However, in viewing the output of the top 6 entries, the top 2 tracts that are farthest from medical facilities don't have any recorded population. 
+
+Thus, the largest community that is also the farthest from a hospital is Tract #9705.02, in Dare County, with 5980 households. 
+
+***
+
+### Conclusion
+For this project, I analyzed the spatial patterns of NC medical facilities, specifically hospitals and surgery centers, in relation to census tract-level population density to determine what was the largest community that must travel the farthest to reach one of these facilities. Through mapping and performing spatial clustering analysis on medical facility locations, I was able to better understand their distribution patterns and make targeted distance inquiries that show that a hospital could be placed in Tract 9705.02 in Dare County to cut down the most travel time for the most patients. 
+
+***
+
+#### Document Statistics: Word Count
+```{r , echo = FALSE, message = FALSE}
+wordcountaddin:::text_stats() %>%
+  kable_styling(bootstrap_options = c("striped",
+                                      "hover",
+                                      "condensed",
+                                      "responsive"),
+                full_width = F)
+```
+
